@@ -47,6 +47,8 @@ log "✅ Node is reachable"
 # ── 2. Check exporters are running on new node ────────────────────────────────
 log "Checking exporters on ${NODE_IP}..."
 
+GPU_NODE=false
+
 if curl -s --connect-timeout 5 http://${NODE_IP}:9100/metrics > /dev/null 2>&1; then
     log "✅ Node Exporter is running on ${NODE_IP}:9100"
 else
@@ -56,8 +58,10 @@ fi
 if curl -s --connect-timeout 5 http://${NODE_IP}:9400/metrics | grep -q "DCGM" 2>/dev/null; then
     GPU_COUNT=$(curl -s http://${NODE_IP}:9400/metrics | grep "DCGM_FI_DEV_SM_CLOCK" | wc -l)
     log "✅ DCGM Exporter is running on ${NODE_IP}:9400 (${GPU_COUNT} GPUs)"
+    GPU_NODE=true
 else
-    error "❌ DCGM Exporter not responding on ${NODE_IP}:9400. Run 2_setup_compute_node.sh first."
+    warn "⚠️  DCGM not found on ${NODE_IP}:9400 — treating as CPU-only node"
+    log "   Only Node Exporter :9100 will be added to monitoring"
 fi
 
 # ── 3. Check if node already exists in config ─────────────────────────────────
@@ -79,12 +83,13 @@ python3 << PYEOF
 import re
 
 node_ip = "${NODE_IP}"
+gpu_node = "${GPU_NODE}" == "true"
 config_file = "${PROMETHEUS_CONFIG}"
 
 with open(config_file, 'r') as f:
     content = f.read()
 
-# Add to compute-node job - insert after last :9100 target
+# Always add to compute-node job (:9100)
 content = re.sub(
     r"(job_name: 'compute-node'.*?targets:.*?)((\s+- '[^']+:9100')+)",
     lambda m: m.group(0) + f"\n          - '{node_ip}:9100'",
@@ -92,18 +97,20 @@ content = re.sub(
     flags=re.DOTALL
 )
 
-# Add to compute-gpu job - insert after last :9400 target
-content = re.sub(
-    r"(job_name: 'compute-gpu'.*?targets:.*?)((\s+- '[^']+:9400')+)",
-    lambda m: m.group(0) + f"\n          - '{node_ip}:9400'",
-    content,
-    flags=re.DOTALL
-)
+# Only add to compute-gpu job (:9400) if GPU node
+if gpu_node:
+    content = re.sub(
+        r"(job_name: 'compute-gpu'.*?targets:.*?)((\s+- '[^']+:9400')+)",
+        lambda m: m.group(0) + f"\n          - '{node_ip}:9400'",
+        content,
+        flags=re.DOTALL
+    )
+    print(f"Added {node_ip} to compute-node and compute-gpu jobs")
+else:
+    print(f"Added {node_ip} to compute-node job only (CPU-only node)")
 
 with open(config_file, 'w') as f:
     f.write(content)
-
-print(f"Successfully added {node_ip} to {config_file}")
 PYEOF
 
 # ── 6. Validate updated config ────────────────────────────────────────────────
@@ -140,4 +147,23 @@ log "Waiting for first scrape (30s)..."
 sleep 30
 
 log "Checking target health for ${NODE_IP}..."
-TARGETS=
+TARGETS=$(curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool)
+NODE_HEALTH=$(echo "$TARGETS" | grep -A5 "\"${NODE_IP}:9100\"" | \
+    grep "health" | head -1 | tr -d ' ",' | cut -d: -f2)
+GPU_HEALTH=$(echo "$TARGETS" | grep -A5 "\"${NODE_IP}:9400\"" | \
+    grep "health" | head -1 | tr -d ' ",' | cut -d: -f2)
+
+log "======================================================"
+log " New Node Added Successfully!"
+log ""
+log " Node IP        : ${NODE_IP}"
+log " Node Exporter  : ${NODE_HEALTH:-pending}"
+log " DCGM Exporter  : ${GPU_HEALTH:-pending}"
+log ""
+log " All current targets:"
+curl -s http://localhost:9090/api/v1/targets | \
+    python3 -m json.tool | \
+    grep -E '"instance"|"health"' | \
+    paste - - | \
+    awk '{print "   " $0}'
+log "======================================================"
