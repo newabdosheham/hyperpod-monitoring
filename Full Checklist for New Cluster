@@ -1,0 +1,21 @@
+Full Checklist for New Cluster
+On new head node:
+  ✅ bash 1_setup_head_node.sh
+
+On each new compute node:
+  ✅ bash 2_setup_compute_node.sh
+
+On new head node:
+  ✅ bash 3_configure_prometheus.sh \
+       --cluster-name "New-Cluster-2" \
+       --region "us-east-1" \
+       --ec2-ip "<ec2-elastic-ip>"
+
+On AWS Console:
+  ✅ Add new head node IP to EC2 security group port 9090
+
+On EC2:
+  ✅ Verify data arriving:
+     curl -s 'http://localhost:9090/api/v1/query' \
+       --data 'query={cluster="New-Cluster-2"}' | \
+       python3 -m json.tool | grep '__name__' | head -5

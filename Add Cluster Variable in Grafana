@@ -1,0 +1,10 @@
+Add Cluster Variable in Grafana
+Suggest the on-prem team add a cluster dropdown variable to their dashboards:
+Dashboard Settings → Variables → New
+
+Name    : cluster
+Type    : Query
+Query   : label_values(cluster)
+Multi   : ON ✅
+All     : ON ✅
+Then use {cluster=~"$cluster"} in all panels — users can switch between clusters or view all at once with a single dropdown.
