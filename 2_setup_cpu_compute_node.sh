@@ -3,7 +3,9 @@
 # Script  : 2_setup_compute_node.sh
 # Purpose : Install Node Exporter + DCGM Exporter on compute node
 # Run on  : Each HyperPod Compute Node
-# Usage   : bash 2_setup_compute_node.sh
+# Usage   : sudo bash 2_setup_compute_node.sh
+# Notes   : Handles shared FSx Lustre storage (binary already exists case)
+#           Automatically detects GPU vs CPU-only nodes
 # =============================================================================
 
 set -e
@@ -24,7 +26,8 @@ DCGM_VERSION="3.3.5-3.4.0-ubuntu22.04"
 
 log "======================================================"
 log " HyperPod Compute Node Setup"
-log " Hostname: $(hostname)"
+log " Hostname  : $(hostname)"
+log " Node type : $(nvidia-smi &>/dev/null && echo 'GPU' || echo 'CPU-only')"
 log " Node Exporter v${NODE_EXPORTER_VERSION}"
 log " DCGM Exporter v${DCGM_VERSION}"
 log "======================================================"
@@ -35,12 +38,24 @@ sudo useradd -rs /bin/false node_exporter 2>/dev/null || warn "User already exis
 
 # ── 2. Install Node Exporter ──────────────────────────────────────────────────
 log "Installing Node Exporter v${NODE_EXPORTER_VERSION}..."
-cd /tmp
-wget -q https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
-tar xvf node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz > /dev/null
-sudo cp node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/
-rm -rf node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64*
 
+# Check if binary already exists (shared FSx Lustre case)
+if [ -f /usr/local/bin/node_exporter ]; then
+    warn "node_exporter binary already exists — skipping download and copy"
+    warn "This is expected when nodes share FSx Lustre storage"
+else
+    cd /tmp
+    wget -q https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
+    tar xvf node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz > /dev/null
+
+    # Stop service before copying if running (avoids "Text file busy" error)
+    sudo systemctl stop node_exporter 2>/dev/null || true
+    sudo cp node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/
+    rm -rf node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64*
+    log "node_exporter binary installed"
+fi
+
+# Always create/update service file (each node needs its own systemd service)
 sudo tee /etc/systemd/system/node_exporter.service > /dev/null << 'EOF'
 [Unit]
 Description=Node Exporter
@@ -58,7 +73,7 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable node_exporter
-sudo systemctl start node_exporter
+sudo systemctl restart node_exporter
 log "Node Exporter status: $(sudo systemctl is-active node_exporter)"
 
 # ── 3. Detect GPU and Install DCGM if available ───────────────────────────────
@@ -66,7 +81,7 @@ GPU_AVAILABLE=false
 
 if nvidia-smi &> /dev/null; then
     GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-    log "✅ GPU detected: ${GPU_COUNT} GPU(s) found"
+    log "GPU detected: ${GPU_COUNT} GPU(s) found"
     GPU_AVAILABLE=true
 else
     warn "No GPU detected — this is a CPU-only node. Skipping DCGM Exporter."
@@ -80,9 +95,12 @@ if [ "$GPU_AVAILABLE" = true ]; then
         error "Docker not found. Please install Docker first."
     fi
 
-    # Stop existing container if running
-    sudo docker stop dcgm-exporter 2>/dev/null || true
-    sudo docker rm dcgm-exporter 2>/dev/null || true
+    # Check if DCGM container already running
+    if sudo docker ps | grep -q dcgm-exporter; then
+        warn "DCGM exporter container already running — restarting with correct config"
+        sudo docker stop dcgm-exporter 2>/dev/null || true
+        sudo docker rm dcgm-exporter 2>/dev/null || true
+    fi
 
     # Start DCGM exporter
     sudo docker run -d \
