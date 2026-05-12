@@ -86,14 +86,41 @@ fi
 # ── 4. Remote Write Status ────────────────────────────────────────────────────
 section "Remote Write to EC2"
 
-FAILED=$(curl -s 'http://localhost:9090/api/v1/query' \
-    --data 'query=prometheus_remote_storage_failed_samples_total' | \
+# Check if head node metrics exist (confirms scraping is working)
+HEAD_UP=$(curl -s 'http://localhost:9090/api/v1/query' \
+    --data 'query=up{job="head-node"}' | \
     python3 -m json.tool 2>/dev/null | grep '"value"' | head -1 || echo "")
 
-if [ -z "$FAILED" ]; then
-    warn "Remote write metrics not available yet (waiting for first scrape)"
+# Check remote write samples sent
+SAMPLES_SENT=$(curl -s 'http://localhost:9090/api/v1/query' \
+    --data 'query=prometheus_remote_storage_samples_total' | \
+    python3 -m json.tool 2>/dev/null | grep '"value"' | head -1 || echo "")
+
+# Check for failed samples
+FAILED=$(curl -s 'http://localhost:9090/api/v1/query' \
+    --data 'query=prometheus_remote_storage_failed_samples_total' | \
+    python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    r=d['data']['result']
+    print(r[0]['value'][1] if r else '0')
+except:
+    print('0')
+" 2>/dev/null || echo "0")
+
+if [ -n "$HEAD_UP" ]; then
+    log "Prometheus is scraping targets successfully"
+    if [ -n "$SAMPLES_SENT" ]; then
+        log "Remote write is active — samples being sent to EC2"
+    else
+        log "Remote write initializing — data will flow within 60s"
+    fi
+    if [ "$FAILED" != "0" ] && [ -n "$FAILED" ]; then
+        warn "Failed samples: ${FAILED} — check EC2 connectivity"
+    fi
 else
-    log "Remote write is active"
+    warn "Prometheus scraping not confirmed yet — wait 60s and re-run"
 fi
 
 # ── 5. EC2 Prometheus Check ───────────────────────────────────────────────────
